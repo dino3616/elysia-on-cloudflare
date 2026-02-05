@@ -1,26 +1,32 @@
 /**
- * Welcome to Cloudflare Workers! This is your first worker.
+ * Minimal reproduction for Elysia on Cloudflare Workers issue
  *
- * - Run `npm run dev` in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your worker in action
- * - Run `npm run deploy` to publish your worker
- *
- * Bind resources to your worker in `wrangler.jsonc`. After adding bindings, a type definition for the
- * `Env` object can be regenerated with `npm run cf-typegen`.
- *
- * Learn more at https://developers.cloudflare.com/workers/
+ * Testing without CloudflareAdapter to see if the error occurs.
  */
 
-export default {
-	async fetch(request, env, ctx): Promise<Response> {
-		const url = new URL(request.url);
-		switch (url.pathname) {
-			case '/message':
-				return new Response('Hello, World!');
-			case '/random':
-				return new Response(crypto.randomUUID());
-			default:
-				return new Response('Not Found', { status: 404 });
-		}
-	},
-} satisfies ExportedHandler<Env>;
+import { cors } from "@elysiajs/cors";
+import { Elysia, t } from "elysia";
+
+// Without CloudflareAdapter - using default Elysia export pattern
+const app = new Elysia()
+	.use(cors())
+	.get("/", () => "Hello Elysia on Cloudflare Workers!")
+	.get("/json", () => ({
+		message: "Hello World",
+		timestamp: Date.now(),
+	}))
+	.post(
+		"/echo",
+		({ body }) => body,
+		{
+			body: t.Object({
+				message: t.String(),
+			}),
+			response: t.Object({
+				message: t.String(),
+			}),
+		},
+	)
+	.compile();
+
+export default app;
