@@ -1,6 +1,6 @@
 # Elysia on Cloudflare Workers - Minimal Reproduction
 
-This repository demonstrates a bug in Elysia 1.4.19+ that prevents deployment to Cloudflare Workers **when not using `CloudflareAdapter`**.
+This repository demonstrates a bug in Elysia 1.4.19+ that prevents deployment to Cloudflare Workers when using the common pattern of defining models at module level.
 
 ## Bug Description
 
@@ -11,90 +11,91 @@ Asynchronous I/O (ex: fetch() or connect()), setting a timeout,
 and generating random values are not allowed within global scope.
 ```
 
-**Stack Trace:**
+**Full Stack Trace:**
 ```
-at null.<anonymous> (worker.js:16:16) in eval
-at null.<anonymous> (elysia/dist/compose.mjs:1178:3) in composeGeneralHandler
-at null.<anonymous> (elysia/dist/index.mjs:1850:119) in compile
-at null.<anonymous> (src/index.ts:30:3)
+at randomId (elysia/dist/utils.mjs:505:23)
+at mapSchema (elysia/dist/schema.mjs:226:261)
+at getSchemaValidator (elysia/dist/schema.mjs:237:16)
+at createBody (elysia/dist/index.mjs:401:54)
+at composeHandler (elysia/dist/compose.mjs:254:15)
+at compile (elysia/dist/index.mjs:593:24)
+at beforeCompile (elysia/dist/adapter/cloudflare-worker/index.mjs:39:43)
+at compile (elysia/dist/index.mjs:1850:29)
+at src/index.ts:36:3
 ```
 
 ## Root Cause
 
-Since [#1604](https://github.com/elysiajs/elysia/issues/1604) was merged in v1.4.19, Elysia's lazy compilation feature calls `randomId()` → `crypto.randomUUID()` at module load time (global scope) within `composeGeneralHandler`.
+Since [#1604](https://github.com/elysiajs/elysia/issues/1604) was merged in v1.4.19, schema compilation calls `randomId()` → `crypto.randomUUID()` during the `mapSchema` phase.
 
-Cloudflare Workers [prohibits generating random values in global scope](https://developers.cloudflare.com/workers/runtime-apis/handlers/), causing the deployment to fail.
+When models are defined at module level (a very common pattern in Elysia), importing them triggers schema validation which calls `crypto.randomUUID()` in global scope.
 
-**Important:** Using `CloudflareAdapter` avoids this issue because the adapter handles compilation differently. The bug only occurs when:
-1. **NOT** using `CloudflareAdapter`, AND
-2. Calling `.compile()` at module level (global scope)
+Cloudflare Workers [prohibits generating random values in global scope](https://developers.cloudflare.com/workers/runtime-apis/handlers/).
+
+## The Problematic Pattern
+
+This is a **very common pattern** in Elysia applications:
+
+```typescript
+// src/model.ts - Model defined at module level
+import { Elysia, t } from "elysia";
+
+// This triggers randomId() when the module is imported
+export const UserModel = new Elysia({ name: "User.Model" }).model({
+  "user.create": t.Object({
+    name: t.String(),
+    email: t.String(),
+  }),
+});
+```
+
+```typescript
+// src/index.ts
+import { UserModel } from "./model";  // ← Error occurs here!
+
+const app = new Elysia({ adapter: CloudflareAdapter })
+  .use(UserModel)
+  .compile();
+```
 
 ## Affected Versions
 
-| Elysia Version | Without CloudflareAdapter | With CloudflareAdapter |
-|----------------|---------------------------|------------------------|
-| 1.4.18 | ✅ Works | ✅ Works |
-| 1.4.19 | ❌ Fails | ✅ Works |
-| 1.4.20 | ❌ Fails | ✅ Works |
-| 1.4.21 | ❌ Fails | ✅ Works |
-| 1.4.22 | ❌ Fails | ✅ Works |
+| Elysia Version | Status  |
+| -------------- | ------- |
+| 1.4.18         | ✅ Works |
+| 1.4.19         | ❌ Fails |
+| 1.4.20         | ❌ Fails |
+| 1.4.21         | ❌ Fails |
+| 1.4.22         | ❌ Fails |
 
 ## Reproduction Steps
 
-### To Reproduce the Error (without CloudflareAdapter)
-
 ```bash
-# 1. Install dependencies
+# 1. Clone this repository
+git clone https://github.com/dino3616/elysia-on-cloudflare.git
+cd elysia-on-cloudflare
+
+# 2. Install dependencies
 bun install
 
-# 2. Edit src/index.ts to remove CloudflareAdapter (see below)
-
-# 3. Deploy - this will fail
+# 3. Deploy to Cloudflare Workers (this will fail)
 CLOUDFLARE_ACCOUNT_ID=your_account_id bun run deploy
-```
-
-**Failing Code (src/index.ts):**
-```typescript
-import { Elysia } from "elysia";
-
-// Without CloudflareAdapter - causes error
-const app = new Elysia()
-  .get("/", () => "Hello!")
-  .compile();
-
-export default app;
-```
-
-### Working Code (with CloudflareAdapter)
-
-```typescript
-import { Elysia } from "elysia";
-import { CloudflareAdapter } from "elysia/adapter/cloudflare-worker";
-
-// With CloudflareAdapter - works fine
-const app = new Elysia({ adapter: CloudflareAdapter })
-  .get("/", () => "Hello!")
-  .compile();
-
-export default app;
 ```
 
 ## Workarounds
 
-### Option 1: Use CloudflareAdapter (Recommended)
-
-```typescript
-import { CloudflareAdapter } from "elysia/adapter/cloudflare-worker";
-
-const app = new Elysia({ adapter: CloudflareAdapter })
-  .get("/", () => "Hello!")
-  .compile();
-```
-
-### Option 2: Downgrade to Elysia 1.4.18
+### Option 1: Downgrade to Elysia 1.4.18
 
 ```bash
 bun add elysia@1.4.18
+```
+
+### Option 2: Use local patch (bun patch)
+
+```bash
+bun patch elysia
+# Apply the fix to node_modules/elysia/dist/utils.mjs
+bun patch --commit node_modules/elysia
 ```
 
 ## Proposed Fix
@@ -123,7 +124,7 @@ export const randomId = (): string => {
         return uuid.slice(0, 8) + uuid.slice(24, 32)
     } catch {
         // Fallback for environments where crypto.randomUUID() throws
-        // in global scope (e.g., Cloudflare Workers without adapter)
+        // in global scope (e.g., Cloudflare Workers)
         return generateRandomIdFallback()
     }
 }
@@ -139,4 +140,3 @@ export const randomId = (): string => {
 ## Related Issues
 
 - [#1604](https://github.com/elysiajs/elysia/issues/1604) - Lazy compilation improvement that introduced the regression
-- [#1614](https://github.com/elysiajs/elysia/issues/1614) - Cloudflare Worker with dynamic path
